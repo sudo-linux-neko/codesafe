@@ -19,6 +19,7 @@ pub mod cli;
 pub mod config;
 pub mod diagnostics;
 pub mod git;
+pub mod orchestration;
 pub mod profile;
 pub mod report;
 pub mod rule_engine;

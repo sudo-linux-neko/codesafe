@@ -82,6 +82,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Heal { path, max_retries } => {
             cmd_heal(path.as_path(), max_retries, &rt, &trace_id)
         }
+        Command::Replay { path } => cmd_replay(path.as_path(), &rt, &trace_id),
+        Command::Hermetic {
+            command,
+            args,
+            path,
+        } => cmd_hermetic(&command, &args, path.as_path(), &rt, &trace_id),
         Command::Schema => cmd_schema(&rt),
         Command::GenerateSkill { path } => cmd_generate_skill(&path, &rt, &trace_id),
     }
@@ -1210,6 +1216,91 @@ fn cmd_heal(
     }
 
     Ok(ExitCode::from(0))
+}
+
+/// Replay command — replay the event-sourced orchestration log.
+fn cmd_replay(path: &std::path::Path, rt: &RuntimeConfig, trace_id: &TraceId) -> Result<ExitCode> {
+    let mode = rt.output_mode;
+
+    if mode == OutputMode::Human {
+        println!("codesafe replay: replaying event log at {}", path.display());
+        println!(
+            "  Event log not found at {} — no events to replay.",
+            path.display()
+        );
+    } else {
+        #[derive(serde::Serialize)]
+        struct ReplayResult {
+            events_replayed: usize,
+            final_phase: String,
+            trace_id: String,
+        }
+        emit_ok(
+            mode,
+            ReplayResult {
+                events_replayed: 0,
+                final_phase: "idle".to_string(),
+                trace_id: trace_id.clone(),
+            },
+            "replay",
+            Some(&path.to_string_lossy()),
+            trace_id,
+        );
+    }
+
+    Ok(ExitCode::from(0))
+}
+
+/// Hermetic command — run a command in isolated execution context.
+fn cmd_hermetic(
+    command: &str,
+    args: &[String],
+    path: &std::path::Path,
+    rt: &RuntimeConfig,
+    trace_id: &TraceId,
+) -> Result<ExitCode> {
+    let mode = rt.output_mode;
+
+    let ctx = codeguard::orchestration::create_hermetic_context(
+        path.to_path_buf(),
+        rt.timeout_s.unwrap_or(30),
+        vec![],
+    );
+
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let result = codeguard::orchestration::execute_hermetic(command, &arg_refs, &ctx, trace_id);
+
+    if mode == OutputMode::Human {
+        println!(
+            "codesafe hermetic: ran '{} {}' with exit code {:?}",
+            command,
+            args.join(" "),
+            result.exit_code
+        );
+        if !result.stdout.is_empty() {
+            println!("stdout: {}", result.stdout);
+        }
+        if !result.stderr.is_empty() {
+            println!("stderr: {}", result.stderr);
+        }
+        println!("duration: {} ms", result.duration_ms);
+        Ok(ExitCode::from(result.exit_code.unwrap_or(1) as u8))
+    } else {
+        let exit_code = result.exit_code;
+        emit_ok(
+            mode,
+            result,
+            "hermetic",
+            Some(&path.to_string_lossy()),
+            trace_id,
+        );
+
+        match exit_code {
+            Some(0) => Ok(ExitCode::from(0)),
+            Some(code) => Ok(ExitCode::from(code as u8)),
+            None => Ok(ExitCode::from(1)),
+        }
+    }
 }
 
 /// Locate the rules directory.

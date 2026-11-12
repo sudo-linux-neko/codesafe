@@ -142,12 +142,26 @@ pub enum Command {
         #[arg(long, default_value = "5")]
         max_retries: u32,
     },
-    /// Emit a JSON schema for all commands and flags (agent introspection).
-    #[command(hide = true)]
-    Schema,
     /// Generate an agent skill document for LLM tool-use.
     #[command(hide = true)]
     GenerateSkill {
+        #[arg(value_name = "PATH", default_value = ".")]
+        path: PathBuf,
+    },
+    /// Emit a JSON schema for all commands and flags (agent introspection).
+    #[command(hide = true)]
+    Schema,
+    /// Replay the event-sourced orchestration log.
+    Replay {
+        #[arg(value_name = "PATH", default_value = ".codeguard/events.jsonl")]
+        path: PathBuf,
+    },
+    /// Run a command in hermetic (isolated) execution context.
+    Hermetic {
+        #[arg(value_name = "COMMAND")]
+        command: String,
+        #[arg(value_name = "ARGS", value_delimiter = ' ')]
+        args: Vec<String>,
         #[arg(value_name = "PATH", default_value = ".")]
         path: PathBuf,
     },
@@ -223,7 +237,9 @@ pub fn schema_json() -> serde_json::Value {
             "green": { "description": "Run GREEN verification (implementation against RED tests)", "args": { "path": { "type": "string", "default": "." } } },
             "cover": { "description": "Analyze coverage and identify hotspots needing tests", "args": { "path": { "type": "string", "default": "." }, "min_complexity": { "type": "integer", "default": 5 }, "max_coverage_pct": { "type": "number", "default": 50.0 } } },
             "gen-test": { "description": "Generate tests targeting coverage hotspots", "args": { "path": { "type": "string", "default": "." }, "max_tests": { "type": "integer", "default": 10 } } },
-            "heal": { "description": "Run self-healing loop: generate → review → verify → fix", "args": { "path": { "type": "string", "default": "." }, "max_retries": { "type": "integer", "default": 5 } } }
+            "heal": { "description": "Run self-healing loop: generate → review → verify → fix", "args": { "path": { "type": "string", "default": "." }, "max_retries": { "type": "integer", "default": 5 } } },
+            "replay": { "description": "Replay the event-sourced orchestration log", "args": { "path": { "type": "string", "default": ".codeguard/events.jsonl" } } },
+            "hermetic": { "description": "Run a command in hermetic (isolated) execution context", "args": { "command": { "type": "string" }, "args": { "type": "array", "items": { "type": "string" } }, "path": { "type": "string", "default": "." } } },
         },
         "output_envelope": {
             "description": "Every json/jsonl response follows this envelope: { ok, result, error, meta }",
@@ -458,6 +474,34 @@ pub fn skill_document(path: &str) -> String {
         "required": [],
         "additionalProperties": false
       }}
+    }},
+    {{
+      "name": "codesafe replay",
+      "description": "Replay the event-sourced orchestration log.",
+      "parameters": {{
+        "type": "object",
+        "properties": {{
+          "path": {{ "type": "string", "description": "Path to the event log (default: .codeguard/events.jsonl)" }},
+          "output": {{ "type": "string", "enum": ["human", "json", "jsonl"], "description": "Output mode (default: human)" }}
+        }},
+        "required": [],
+        "additionalProperties": false
+      }}
+    }},
+    {{
+      "name": "codesafe hermetic",
+      "description": "Run a command in hermetic (isolated) execution context.",
+      "parameters": {{
+        "type": "object",
+        "properties": {{
+          "command": {{ "type": "string", "description": "Command to execute" }},
+          "args": {{ "type": "array", "items": {{ "type": "string" }}, "description": "Command arguments" }},
+          "path": {{ "type": "string", "description": "Working directory (default: .)" }},
+          "output": {{ "type": "string", "enum": ["human", "json", "jsonl"], "description": "Output mode (default: human)" }}
+        }},
+        "required": ["command"],
+        "additionalProperties": false
+      }}
     }}
   ],
   "repository": "{path}",
@@ -466,7 +510,9 @@ pub fn skill_document(path: &str) -> String {
     "parsed_diagnostics",
     "recovery_hints",
     "anti_gaming_verification",
-    "receipt_bound_verdicts"
+    "receipt_bound_verdicts",
+    "event_sourced_state",
+    "hermetic_execution"
   ]
 }}"#
     )
