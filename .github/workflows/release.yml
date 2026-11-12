@@ -6,60 +6,7 @@ on:
       - 'v*'
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Create GitHub release
-        id: create_release
-        uses: softprops/action-gh-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: codeguard ${{ github.ref_name }}
-          body: |
-            ## codeguard ${{ github.ref_name }}
-
-            Prebuilt binaries:
-
-            | Platform | Asset |
-            |----------|-------|
-            | Linux x86_64 | `codeguard-linux-x86_64` |
-            | macOS x86_64 (Intel) | `codeguard-macos-x86_64` |
-            | macOS aarch64 (Apple Silicon) | `codeguard-macos-aarch64` |
-            | Windows x86_64 | `codeguard-windows-x86_64.exe` |
-
-            ### Quick install
-
-            **Linux / macOS:**
-            ```bash
-            curl -fsSL https://github.com/sudo-linux-neko/codesafe/releases/download/${{ github.ref_name }}/codeguard-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m) -o /usr/local/bin/codeguard && chmod +x /usr/local/bin/codeguard
-            ```
-
-            **Windows (PowerShell):**
-            ```powershell
-            Invoke-WebRequest -Uri "https://github.com/sudo-linux-neko/codesafe/releases/download/${{ github.ref_name }}/codeguard-windows-x86_64.exe" -OutFile "$env:USERPROFILE\codeguard.exe"
-            ```
-
-            **Termux (Android aarch64):**
-            Build from source (Linux aarch64 binary coming soon):
-            ```bash
-            pkg install rust cargo git
-            export CARGO_TARGET_DIR=$HOME/.cache/codeguard-target
-            git clone https://github.com/sudo-linux-neko/codesafe.git ~/codeguard-src
-            cd ~/codeguard-src && cargo build --release
-            cp target/release/codeguard $PREFIX/bin/codeguard
-            ```
-          draft: false
-          prerelease: false
-
   build:
-    needs: release
     strategy:
       fail-fast: false
       matrix:
@@ -111,12 +58,8 @@ jobs:
             cp target/${{ matrix.target }}/release/codeguard ${{ matrix.artifact }}
           fi
 
-      - name: Upload asset
-        uses: actions/upload-release-asset@v1
+      - name: Upload asset to release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.release.outputs.upload_url }}
-          asset_path: ${{ matrix.artifact }}
-          asset_name: ${{ matrix.artifact }}
-          asset_content_type: application/octet-stream
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ github.ref_name }} ${{ matrix.artifact }} --repo sudo-linux-neko/codesafe
