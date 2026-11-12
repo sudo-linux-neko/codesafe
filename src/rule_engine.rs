@@ -167,33 +167,31 @@ pub fn findings_from_results(
             .cloned()
             .collect();
         if matched.is_empty() {
-            findings.push(Finding {
-                id: format!("{}-failure", result.tool),
-                severity: severity_from_exit(result.exit_code),
+            let mut f = Finding::new(
+                &format!("{}-failure", result.tool),
+                severity_from_exit(result.exit_code),
                 language,
-                file: file.unwrap_or_default(),
-                line,
-                category: "tool".into(),
-                status: FindingStatus::Reported,
-                description: first_non_empty_line(&output),
-                fix: None,
-                evidence: output.trim().to_string(),
-            });
+                "tool",
+                &first_non_empty_line(&output),
+            );
+            f.file = file.unwrap_or_default();
+            f.line = line;
+            findings.push(f);
             continue;
         }
         for rule in matched {
-            findings.push(Finding {
-                id: rule.id.clone(),
-                severity: severity_from_exit(result.exit_code),
+            let mut f = Finding::new(
+                &rule.id,
+                severity_from_exit(result.exit_code),
                 language,
-                file: file.clone().unwrap_or_default(),
-                line,
-                category: rule.id.clone(),
-                status: FindingStatus::Reported,
-                description: rule.explanation.clone(),
-                fix: Some(rule.action.clone()),
-                evidence: output.trim().to_string(),
-            });
+                &rule.id,
+                &rule.explanation,
+            );
+            f.file = file.clone().unwrap_or_default();
+            f.line = line;
+            f.fix = Some(rule.action.clone());
+            f.evidence = output.trim().to_string();
+            findings.push(f);
         }
     }
     findings
@@ -467,18 +465,11 @@ fn finding_from_verdict(rule: &Rule, language: Language, verdict: FixVerdict) ->
             "dry run, would apply: ".to_string() + &rule.action,
         ),
     };
-    Finding {
-        id: rule.id.clone(),
-        severity: Severity::Info,
-        language,
-        file: String::new(),
-        line: None,
-        category: "rule".into(),
-        status,
-        description,
-        fix: Some(rule.action.clone()),
-        evidence: rule.explanation.clone(),
-    }
+    let mut f = Finding::new(&rule.id, Severity::Info, language, "rule", &description);
+    f.status = status;
+    f.fix = Some(rule.action.clone());
+    f.evidence = rule.explanation.clone();
+    f
 }
 
 #[cfg(test)]

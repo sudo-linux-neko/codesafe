@@ -1,1 +1,6 @@
 /target
+/.codeguard/
+report.md
+report.json
+**/report.md
+**/report.json

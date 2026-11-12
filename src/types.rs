@@ -135,11 +135,52 @@ pub struct Finding {
     pub language: Language,
     pub file: String,
     pub line: Option<u32>,
+    pub column: Option<u32>,
     pub category: String,
+    pub error_type: Option<String>,
     pub status: FindingStatus,
     pub description: String,
     pub fix: Option<String>,
     pub evidence: String,
+    pub context_lines: Vec<String>,
+    pub trace_id: Option<String>,
+    pub recovery_hint: Option<RecoveryHint>,
+}
+
+/// Recovery hint attached to a finding.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryHint {
+    pub action: String,
+    pub fix: Option<String>,
+    pub confidence: f64,
+}
+
+impl Finding {
+    pub fn new(
+        id: &str,
+        severity: Severity,
+        language: Language,
+        category: &str,
+        description: &str,
+    ) -> Self {
+        Self {
+            id: id.to_string(),
+            severity,
+            language,
+            file: String::new(),
+            line: None,
+            column: None,
+            category: category.to_string(),
+            error_type: None,
+            status: FindingStatus::Reported,
+            description: description.to_string(),
+            fix: None,
+            evidence: String::new(),
+            context_lines: Vec::new(),
+            trace_id: None,
+            recovery_hint: None,
+        }
+    }
 }
 
 /// One benchmark measurement.

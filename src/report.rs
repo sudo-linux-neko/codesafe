@@ -1,7 +1,11 @@
 //! Report generation: report.md for humans, report.json for tools/AI.
 
-use crate::Result;
-use crate::types::{AiTip, Finding, FindingStatus, Language, Report, Severity};
+use crate::{
+    Result,
+    aci::make_trace_id,
+    diagnostics,
+    types::{AiTip, Finding, FindingStatus, Language, Report, Severity},
+};
 use std::path::Path;
 
 /// Write report.md and report.json into `path`.
@@ -100,6 +104,8 @@ pub fn render_md(report: &Report) -> String {
 }
 
 /// Convert a tool result into a reported finding.
+/// Attempts to parse structured diagnostics from tool output first;
+/// falls back to raw output if parsing fails.
 pub fn finding_from_result(
     id: &str,
     language: Language,
@@ -112,29 +118,79 @@ pub fn finding_from_result(
         Some(_) => Severity::Error,
         None => Severity::Critical,
     };
-    // Some tools (e.g. clang-format) write findings to stdout, not stderr.
-    let diagnostic = if !result.stderr.trim().is_empty() {
+    let trace_id = make_trace_id("finding", None);
+
+    // Try to parse structured diagnostics from tool output
+    let diagnostic_text = if !result.stderr.trim().is_empty() {
         result.stderr.trim().to_string()
     } else if !result.stdout.trim().is_empty() {
         result.stdout.trim().to_string()
     } else {
         "(no diagnostic output)".to_string()
     };
+
+    // Try tool-specific parsing first
+    let parsed = match result.tool.as_str() {
+        "python3" => {
+            let diags = diagnostics::parse_python_compiler(&result.stderr, &trace_id);
+            if !diags.is_empty() {
+                Some(diags[0].to_finding())
+            } else {
+                None
+            }
+        }
+        "ruff" => {
+            let mut diags = diagnostics::parse_ruff(&result.stderr, &trace_id);
+            diags.extend(diagnostics::parse_ruff(&result.stdout, &trace_id));
+            if !diags.is_empty() {
+                Some(diags[0].to_finding())
+            } else {
+                None
+            }
+        }
+        "pytest" => {
+            let diags = diagnostics::parse_pytest(&result.stderr, &trace_id);
+            if !diags.is_empty() {
+                Some(diags[0].to_finding())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
+    if let Some(mut f) = parsed {
+        f.id = id.to_string();
+        f.language = language;
+        f.category = category.to_string();
+        return f;
+    }
+
+    // Fallback to raw output
     Finding {
         id: id.to_string(),
         severity,
         language,
         file: String::new(),
         line: None,
+        column: None,
         category: category.to_string(),
+        error_type: None,
         status: crate::types::FindingStatus::Reported,
-        description: diagnostic,
+        description: diagnostic_text,
         fix: None,
         evidence: if !result.stdout.trim().is_empty() {
             result.stdout.trim().to_string()
         } else {
             result.stderr.trim().to_string()
         },
+        context_lines: Vec::new(),
+        trace_id: Some(trace_id),
+        recovery_hint: Some(crate::types::RecoveryHint {
+            action: "review the diagnostic and apply a manual fix".to_string(),
+            fix: None,
+            confidence: 0.3,
+        }),
     }
 }
 

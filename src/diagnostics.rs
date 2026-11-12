@@ -20,15 +20,42 @@ pub struct ParsedDiagnostic {
     pub message: String,
     pub context_lines: Vec<String>,
     pub suggestion: Option<String>,
+    pub confidence: f64,
     pub is_retryable: bool,
 }
 
-/// Recovery hint attached to a finding.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecoveryHint {
-    pub action: String,
-    pub fix: Option<String>,
-    pub confidence: f64, // 0.0..1.0
+impl ParsedDiagnostic {
+    /// Convert to a `Finding` with recovery hint attached.
+    pub fn to_finding(&self) -> crate::types::Finding {
+        let confidence = self.confidence;
+        let mut finding = crate::types::Finding::new(
+            &format!("{}-{}", self.tool, self.trace_id),
+            self.severity,
+            match self.tool.as_str() {
+                "python3" => crate::types::Language::Python,
+                "ruff" => crate::types::Language::Python,
+                "pytest" => crate::types::Language::Python,
+                "cargo" => crate::types::Language::Rust,
+                "rustc" => crate::types::Language::Rust,
+                "clang++" | "g++" | "clang" | "gcc" => crate::types::Language::Cpp,
+                _ => crate::types::Language::Python,
+            },
+            &self.error_type,
+            &self.message,
+        );
+        finding.file = self.file.clone().unwrap_or_default();
+        finding.line = self.line;
+        finding.column = self.column;
+        finding.error_type = Some(self.error_type.clone());
+        finding.context_lines = self.context_lines.clone();
+        finding.trace_id = Some(self.trace_id.clone());
+        finding.recovery_hint = Some(crate::types::RecoveryHint {
+            action: self.suggestion.clone().unwrap_or_default(),
+            fix: self.suggestion.clone(),
+            confidence,
+        });
+        finding
+    }
 }
 
 /// Parse Python compiler output (SyntaxError, etc.) into structured diagnostics.
@@ -99,6 +126,7 @@ pub fn parse_python_compiler(stderr: &str, trace_id: &str) -> Vec<ParsedDiagnost
                 suggestion: Some(format!(
                     "fix the {error_type_clone} at {file_display}:{line_display}"
                 )),
+                confidence: 0.95,
                 is_retryable: false,
             });
 
@@ -147,6 +175,7 @@ pub fn parse_ruff(output: &str, trace_id: &str) -> Vec<ParsedDiagnostic> {
                 message,
                 context_lines: vec![line.to_string()],
                 suggestion: Some(format!("run `ruff check --fix {file_clone}`")),
+                confidence: 0.9,
                 is_retryable: true,
             });
         }
@@ -187,6 +216,7 @@ pub fn parse_pytest(output: &str, trace_id: &str) -> Vec<ParsedDiagnostic> {
                     message: format!("test {test_name} failed"),
                     context_lines: vec![line.to_string()],
                     suggestion: Some(format!("inspect the failure in {file_clone}::{test_name}")),
+                    confidence: 0.85,
                     is_retryable: true,
                 });
             }
@@ -237,6 +267,7 @@ pub fn parse_generic_compiler(output: &str, tool: &str, trace_id: &str) -> Vec<P
                     message,
                     context_lines: vec![line.to_string()],
                     suggestion: None,
+                    confidence: 0.8,
                     is_retryable: false,
                 });
             }
@@ -272,15 +303,13 @@ pub fn attach_recovery_hints(diagnostics: &mut [ParsedDiagnostic]) {
 
     // Set confidence based on diagnostic quality (file+line precision)
     for d in diagnostics.iter_mut() {
-        let _confidence = if d.file.is_some() && d.line.is_some() {
-            0.9
+        if d.file.is_some() && d.line.is_some() {
+            d.confidence = d.confidence.max(0.9);
         } else if d.file.is_some() {
-            0.6
+            d.confidence = d.confidence.max(0.6);
         } else {
-            0.3
-        };
-        // Confidence is encoded implicitly via file+line precision;
-        // callers can infer it from the diagnostic structure.
+            d.confidence = d.confidence.max(0.3);
+        }
     }
 }
 
@@ -363,6 +392,7 @@ SyntaxError: unterminated string literal (detected at line 6)
             message: "Line too long".to_string(),
             context_lines: vec![],
             suggestion: None,
+            confidence: 0.5,
             is_retryable: true,
         }];
         attach_recovery_hints(&mut diags);
