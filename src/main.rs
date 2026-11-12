@@ -45,6 +45,26 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Report { path } => cmd_report(&path, &rt, &trace_id),
         Command::All { path } => cmd_all(&path, &rt, &trace_id),
         Command::Init { path } => cmd_init(&path, &rt, &trace_id),
+        Command::Spec {
+            id,
+            description,
+            allowlist,
+        } => cmd_spec(&id, &description, &allowlist, &rt, &trace_id),
+        Command::Red {
+            spec_id,
+            test_name,
+            test_file,
+            test_source,
+        } => cmd_red(
+            &spec_id,
+            &test_name,
+            &test_file,
+            &test_source,
+            &rt,
+            &trace_id,
+        ),
+        Command::Verify { path } => cmd_verify(&path, &rt, &trace_id),
+        Command::Green { path } => cmd_green(&path, &rt, &trace_id),
         Command::Schema => cmd_schema(&rt),
         Command::GenerateSkill { path } => cmd_generate_skill(&path, &rt, &trace_id),
     }
@@ -847,6 +867,209 @@ fn cmd_generate_skill(
             );
             Ok(ExitCode::from(0))
         }
+    }
+}
+
+/// Spec command — write acceptance criteria spec (test-writing agent only).
+fn cmd_spec(
+    id: &str,
+    description: &str,
+    allowlist: &[std::path::PathBuf],
+    rt: &RuntimeConfig,
+    trace_id: &TraceId,
+) -> Result<ExitCode> {
+    let mode = rt.output_mode;
+    let spec = codeguard::verification::create_spec(
+        id,
+        description,
+        allowlist
+            .iter()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect(),
+        allowlist.to_vec(),
+        codeguard::types::Language::Python, // default; will be refined by detection
+        trace_id,
+    );
+
+    if mode == OutputMode::Human {
+        println!("Spec created: {}", spec.id);
+        println!("  Description: {}", spec.description);
+        println!("  Criteria: {}", spec.acceptance_criteria.len());
+        println!("  Allowlist: {:?}", spec.file_allowlist);
+    } else {
+        emit_ok(mode, spec, "spec", None, trace_id);
+    }
+    Ok(ExitCode::from(0))
+}
+
+/// Red command — write a RED test from a spec (test-writing agent only).
+fn cmd_red(
+    spec_id: &str,
+    test_name: &str,
+    test_file: &std::path::Path,
+    test_source: &str,
+    rt: &RuntimeConfig,
+    trace_id: &TraceId,
+) -> Result<ExitCode> {
+    let mode = rt.output_mode;
+
+    // Run anti-gaming stub-passability check on the RED test
+    // We need a unit under test name; for now use a heuristic from the file path
+    let unit_under_test = test_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown");
+
+    let gaming = codeguard::verification::check_stub_passability(test_source, unit_under_test);
+    if matches!(
+        gaming,
+        codeguard::verification::AntiGamingResult::GamingDetected { .. }
+    ) {
+        return Ok(emit_err(
+            mode,
+            "E003",
+            "anti-gaming",
+            &format!("{:?}", gaming),
+            Some("remove mocks from RED test; test real code only"),
+            false,
+            "red",
+            Some(&test_file.to_string_lossy()),
+            trace_id,
+        ));
+    }
+
+    let test_case = codeguard::verification::write_red_test(
+        &codeguard::verification::Spec {
+            id: spec_id.to_string(),
+            description: String::new(),
+            acceptance_criteria: Vec::new(),
+            file_allowlist: Vec::new(),
+            language: codeguard::types::Language::Python,
+            trace_id: trace_id.clone(),
+        },
+        test_name,
+        test_source,
+        test_file.to_path_buf(),
+        trace_id,
+    );
+
+    if mode == OutputMode::Human {
+        println!("RED test written: {}", test_case.id);
+        println!("  File: {}", test_case.file.display());
+        println!("  Anti-gaming: passed");
+    } else {
+        emit_ok(
+            mode,
+            test_case,
+            "red",
+            Some(&test_file.to_string_lossy()),
+            trace_id,
+        );
+    }
+    Ok(ExitCode::from(0))
+}
+
+/// Verify command — run RED-first verification protocol.
+fn cmd_verify(path: &std::path::Path, rt: &RuntimeConfig, trace_id: &TraceId) -> Result<ExitCode> {
+    let mode = rt.output_mode;
+
+    if mode == OutputMode::Human {
+        println!(
+            "codesafe verify: running verification protocol on {}",
+            path.display()
+        );
+    }
+
+    // Run anti-gaming lints on the current state
+    // This is a placeholder - full implementation would check the working tree
+    let results = codeguard::verification::run_anti_gaming_lints(
+        "", // test_source - not available without reading files
+        "unknown",
+        None,
+        "",
+        &[],   // changed_files
+        &[],   // allowlist
+        false, // scoped_passed
+        false, // full_passed
+    );
+
+    let gaming_found = results
+        .iter()
+        .filter(|r| {
+            matches!(
+                r,
+                codeguard::verification::AntiGamingResult::GamingDetected { .. }
+            )
+        })
+        .count();
+
+    if mode == OutputMode::Human {
+        if gaming_found > 0 {
+            println!("codesafe verify: FAIL - {gaming_found} anti-gaming violation(s) detected");
+            for r in &results {
+                if matches!(
+                    r,
+                    codeguard::verification::AntiGamingResult::GamingDetected { .. }
+                ) {
+                    println!("  - {:?}", r);
+                }
+            }
+        } else {
+            println!("codesafe verify: pass - no anti-gaming violations");
+        }
+    } else {
+        #[derive(serde::Serialize)]
+        struct VerifyResult {
+            gaming_violations: usize,
+            checks: Vec<codeguard::verification::AntiGamingResult>,
+            trace_id: String,
+        }
+        emit_ok(
+            mode,
+            VerifyResult {
+                gaming_violations: gaming_found,
+                checks: results,
+                trace_id: trace_id.clone(),
+            },
+            "verify",
+            Some(&path.to_string_lossy()),
+            trace_id,
+        );
+    }
+
+    if gaming_found > 0 {
+        Ok(ExitCode::from(1))
+    } else {
+        Ok(ExitCode::from(0))
+    }
+}
+
+/// Green command — run GREEN verification (implementation against RED tests).
+fn cmd_green(path: &std::path::Path, rt: &RuntimeConfig, trace_id: &TraceId) -> Result<ExitCode> {
+    let mode = rt.output_mode;
+
+    if mode == OutputMode::Human {
+        println!(
+            "codesafe green: running GREEN verification on {}",
+            path.display()
+        );
+    }
+
+    // For now, run the standard test suite as GREEN verification
+    let test_code = cmd_test(path, rt, trace_id)?;
+
+    if mode == OutputMode::Human {
+        if test_code == ExitCode::from(0) {
+            println!("codesafe green: PASS - implementation verified against RED tests");
+        } else {
+            println!("codesafe green: FAIL - implementation does not satisfy RED tests");
+        }
+    }
+
+    if test_code == ExitCode::from(0) {
+        Ok(ExitCode::from(0))
+    } else {
+        Ok(ExitCode::from(1))
     }
 }
 

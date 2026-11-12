@@ -24,6 +24,7 @@ pub mod report;
 pub mod rule_engine;
 pub mod scan;
 pub mod types;
+pub mod verification;
 
 use thiserror::Error;
 

@@ -89,6 +89,36 @@ pub enum Command {
         #[arg(value_name = "PATH", default_value = ".")]
         path: PathBuf,
     },
+    /// Write an acceptance criteria spec (test-writing agent only).
+    Spec {
+        #[arg(value_name = "ID")]
+        id: String,
+        #[arg(value_name = "DESCRIPTION")]
+        description: String,
+        #[arg(value_name = "ALLOWLIST", value_delimiter = ',')]
+        allowlist: Vec<PathBuf>,
+    },
+    /// Write a RED test from a spec (test-writing agent only).
+    Red {
+        #[arg(value_name = "SPEC_ID")]
+        spec_id: String,
+        #[arg(value_name = "TEST_NAME")]
+        test_name: String,
+        #[arg(value_name = "TEST_FILE")]
+        test_file: PathBuf,
+        #[arg(value_name = "TEST_SOURCE")]
+        test_source: String,
+    },
+    /// Run RED-first verification protocol.
+    Verify {
+        #[arg(value_name = "PATH", default_value = ".")]
+        path: PathBuf,
+    },
+    /// Run GREEN verification (implementation against RED tests).
+    Green {
+        #[arg(value_name = "PATH", default_value = ".")]
+        path: PathBuf,
+    },
     /// Emit a JSON schema for all commands and flags (agent introspection).
     #[command(hide = true)]
     Schema,
@@ -163,7 +193,11 @@ pub fn schema_json() -> serde_json::Value {
             "all": { "description": "Scan, test, bench, fix, report", "args": { "path": { "type": "string", "default": "." } } },
             "init": { "description": "Initialize a codesafe.toml config and rules/ directory", "args": { "path": { "type": "string", "default": "." } } },
             "schema": { "description": "Emit this JSON schema", "args": {} },
-            "generate-skill": { "description": "Generate an agent skill document", "args": { "path": { "type": "string", "default": "." } } }
+            "generate-skill": { "description": "Generate an agent skill document", "args": { "path": { "type": "string", "default": "." } } },
+            "spec": { "description": "Write an acceptance criteria spec (test-writing agent only)", "args": { "id": { "type": "string" }, "description": { "type": "string" }, "allowlist": { "type": "array", "items": { "type": "string" } } } },
+            "red": { "description": "Write a RED test from a spec (test-writing agent only)", "args": { "spec_id": { "type": "string" }, "test_name": { "type": "string" }, "test_file": { "type": "string" }, "test_source": { "type": "string" } } },
+            "verify": { "description": "Run RED-first verification protocol", "args": { "path": { "type": "string", "default": "." } } },
+            "green": { "description": "Run GREEN verification (implementation against RED tests)", "args": { "path": { "type": "string", "default": "." } } }
         },
         "output_envelope": {
             "description": "Every json/jsonl response follows this envelope: { ok, result, error, meta }",
@@ -293,6 +327,63 @@ pub fn skill_document(path: &str) -> String {
         "type": "object",
         "properties": {{
           "path": {{ "type": "string", "description": "Project path (default: .)" }},
+          "output": {{ "type": "string", "enum": ["human", "json", "jsonl"], "description": "Output mode (default: human)" }}
+        }},
+        "required": [],
+        "additionalProperties": false
+      }}
+    }},
+    {{
+      "name": "codesafe spec",
+      "description": "Write an acceptance criteria spec (test-writing agent only). Coding agent never sees this.",
+      "parameters": {{
+        "type": "object",
+        "properties": {{
+          "id": {{ "type": "string", "description": "Spec identifier" }},
+          "description": {{ "type": "string", "description": "Human-readable spec description" }},
+          "allowlist": {{ "type": "array", "items": {{ "type": "string" }}, "description": "Files the coding agent is allowed to modify" }},
+          "output": {{ "type": "string", "enum": ["human", "json", "jsonl"], "description": "Output mode (default: human)" }}
+        }},
+        "required": ["id", "description"],
+        "additionalProperties": false
+      }}
+    }},
+    {{
+      "name": "codesafe red",
+      "description": "Write a RED test from a spec (test-writing agent only). Test must fail before implementation.",
+      "parameters": {{
+        "type": "object",
+        "properties": {{
+          "spec_id": {{ "type": "string", "description": "Identifier of the spec this test derives from" }},
+          "test_name": {{ "type": "string", "description": "Name of the test function" }},
+          "test_file": {{ "type": "string", "description": "Path to the test file" }},
+          "test_source": {{ "type": "string", "description": "Full source code of the test" }},
+          "output": {{ "type": "string", "enum": ["human", "json", "jsonl"], "description": "Output mode (default: human)" }}
+        }},
+        "required": ["spec_id", "test_name", "test_file", "test_source"],
+        "additionalProperties": false
+      }}
+    }},
+    {{
+      "name": "codesafe verify",
+      "description": "Run RED-first verification protocol with anti-gaming checks.",
+      "parameters": {{
+        "type": "object",
+        "properties": {{
+          "path": {{ "type": "string", "description": "Repository path (default: .)" }},
+          "output": {{ "type": "string", "enum": ["human", "json", "jsonl"], "description": "Output mode (default: human)" }}
+        }},
+        "required": [],
+        "additionalProperties": false
+      }}
+    }},
+    {{
+      "name": "codesafe green",
+      "description": "Run GREEN verification - implementation against RED tests.",
+      "parameters": {{
+        "type": "object",
+        "properties": {{
+          "path": {{ "type": "string", "description": "Repository path (default: .)" }},
           "output": {{ "type": "string", "enum": ["human", "json", "jsonl"], "description": "Output mode (default: human)" }}
         }},
         "required": [],
