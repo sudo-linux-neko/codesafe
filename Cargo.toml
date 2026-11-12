@@ -1,0 +1,40 @@
+[package]
+name = "codeguard"
+version = "0.1.0"
+edition = "2024"
+description = "Test, benchmark, profile and safely auto-fix Python, Rust and C++ repositories"
+readme = "README.md"
+license = "GPL-3.0-only"
+repository = "https://github.com/sudo-linux-neko/codesafe"
+authors = ["vaibhav <vaibhav@users.noreply.github.com>"]
+keywords = ["codeguard", "lint", "test", "benchmark", "profile", "fix", "rust", "python", "cpp"]
+categories = ["development-tools::quality", "development-tools::testing"]
+
+[[bin]]
+name = "codeguard"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rayon = "1.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+walkdir = "2"
+which = "6"
+thiserror = "1"
+sha2 = "0.10"
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[workspace]

@@ -1,0 +1,96 @@
+//! Benchmark repetition, result caching and regression detection.
+//!
+//! Benchmarks are run several times and reduced to a median. Results are cached by
+//! source-file hash so reruns are fast and before/after comparisons (with change_pct)
+//! are possible. Changes beyond `regression_threshold_pct` are flagged as regressions.
+
+use crate::Result;
+use crate::cache::Cache;
+use crate::types::Language;
+use std::path::Path;
+
+/// Median of `runs` measurements produced by `f`.
+pub fn measure<F>(runs: u32, mut f: F) -> Result<Option<f64>>
+where
+    F: FnMut() -> Result<Option<f64>>,
+{
+    let mut values = Vec::new();
+    for _ in 0..runs {
+        if let Some(v) = f()? {
+            values.push(v);
+        }
+    }
+    Ok(median(&mut values[..]))
+}
+
+/// Median of a non-empty slice; `None` when empty.
+pub fn median(values: &mut [f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(values[values.len() / 2])
+}
+
+/// Persisted benchmark cache: `<language>:<source hash>:<benchmark name>` -> median.
+pub struct BenchmarkCache {
+    cache: Cache,
+}
+
+impl BenchmarkCache {
+    pub fn new(path: &Path) -> Result<Self> {
+        let dir = path.join(".codeguard").join("cache");
+        Ok(Self {
+            cache: Cache::new(&dir)?,
+        })
+    }
+
+    fn key(language: Language, source_hash: &str, name: &str) -> String {
+        format!("bench:{language}:{source_hash}:{name}")
+    }
+
+    pub fn previous(&self, language: Language, source_hash: &str, name: &str) -> Option<f64> {
+        self.cache
+            .get(&Self::key(language, source_hash, name))
+            .and_then(|v| v.parse::<f64>().ok())
+    }
+
+    pub fn store(
+        &mut self,
+        language: Language,
+        source_hash: &str,
+        name: &str,
+        value: f64,
+    ) -> Result<()> {
+        self.cache
+            .put(&Self::key(language, source_hash, name), &value.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn measure_returns_median() {
+        let mut calls = 0;
+        let result = measure(5, || {
+            calls += 1;
+            Ok(Some((calls as f64) * 10.0))
+        })
+        .unwrap();
+        assert_eq!(result, Some(30.0));
+    }
+
+    #[test]
+    fn measure_empty_is_none() {
+        let result = measure(3, || Ok(None)).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn median_sorts() {
+        let mut v = vec![5.0, 1.0, 3.0];
+        assert_eq!(median(&mut v), Some(3.0));
+    }
+}
