@@ -1,0 +1,116 @@
+name: Build Release Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: codeguard-linux-x86_64
+            rust: stable
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: codeguard-linux-aarch64
+            rust: stable
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: codeguard-macos-x86_64
+            rust: stable
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: codeguard-macos-aarch64
+            rust: stable
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: codeguard-windows-x86_64.exe
+            rust: stable
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename binary
+        run: |
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            cp target/${{ matrix.target }}/release/codeguard.exe ${{ matrix.artifact }}
+          else
+            cp target/${{ matrix.target }}/release/codeguard ${{ matrix.artifact }}
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ${{ matrix.artifact }}
+          asset_name: ${{ matrix.artifact }}
+          asset_content_type: application/octet-stream
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: codeguard ${{ github.ref_name }}
+          body: |
+            ## codeguard ${{ github.ref_name }}
+
+            Prebuilt binaries:
+
+            | Platform | Asset |
+            |----------|-------|
+            | Linux x86_64 | `codeguard-linux-x86_64` |
+            | Linux aarch64 (ARM64, Termux) | `codeguard-linux-aarch64` |
+            | macOS x86_64 (Intel) | `codeguard-macos-x86_64` |
+            | macOS aarch64 (Apple Silicon) | `codeguard-macos-aarch64` |
+            | Windows x86_64 | `codeguard-windows-x86_64.exe` |
+
+            ### Quick install
+
+            **Linux / macOS:**
+            ```bash
+            curl -fsSL https://github.com/sudo-linux-neko/codesafe/releases/download/${{ github.ref_name }}/codeguard-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m) -o /usr/local/bin/codeguard && chmod +x /usr/local/bin/codeguard
+            ```
+
+            **Windows (PowerShell):**
+            ```powershell
+            Invoke-WebRequest -Uri "https://github.com/sudo-linux-neko/codesafe/releases/download/${{ github.ref_name }}/codeguard-windows-x86_64.exe" -OutFile "$env:USERPROFILE\codeguard.exe"
+            ```
+
+            **Termux (Android):**
+            ```bash
+            curl -fsSL https://github.com/sudo-linux-neko/codesafe/releases/download/${{ github.ref_name }}/codeguard-linux-aarch64 -o $PREFIX/bin/codeguard && chmod +x $PREFIX/bin/codeguard
+            ```
+          draft: false
+          prerelease: false
