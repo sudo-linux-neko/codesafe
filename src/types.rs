@@ -264,6 +264,7 @@ impl Config {
 }
 
 pub type FileHash = String;
+pub type TraceId = String;
 
 /// Per-file content hash used for caching.
 pub fn hash_file(path: &std::path::Path) -> crate::Result<FileHash> {

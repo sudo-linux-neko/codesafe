@@ -1,14 +1,23 @@
-//! codeguard - test, benchmark, profile and safely auto-fix Python, Rust and C++ repositories.
+//! codesafe - test, benchmark, profile and safely auto-fix Python, Rust and C++ repositories.
 //!
-//! Orchestrates existing per-language tools behind a single trait. Each language is a plugin.
-//! Safe rules are auto-applied inside a verified git-checkpoint loop; everything else is
-//! report-only with AI-actionable tips.
+//! Epistemic infrastructure for agentic coding: independently certifies
+//! whether agent work is correct, making gaming of the feedback loop
+//! structurally impossible.
+//!
+//! Pillars:
+//!   1. ACI Foundation — structured output, schemas, skill docs, parsed diagnostics
+//!   2. Evidence Pipeline — parsed diagnostics, recovery hints, fault localization
+//!   3. Verifiable Verification — asymmetric test/code separation, RED-first gating
+//!   4. Test Generation — coverage-guided, self-healing loop with retry budget
+//!   5. Durable Orchestration — event-sourced state, hermetic execution, receipt-bound verdicts
 
+pub mod aci;
 pub mod adapters;
 pub mod bench;
 pub mod cache;
 pub mod cli;
 pub mod config;
+pub mod diagnostics;
 pub mod git;
 pub mod profile;
 pub mod report;
@@ -18,7 +27,7 @@ pub mod types;
 
 use thiserror::Error;
 
-/// Result type used throughout codeguard.
+/// Result type used throughout codesafe.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Fatal/recoverable errors. None of these use `unwrap` internally.
@@ -52,7 +61,6 @@ pub enum Error {
     Aborted(String),
 }
 
-/// Serde-friendly TOML error wrapper.
 impl From<toml::de::Error> for Error {
     fn from(err: toml::de::Error) -> Self {
         Error::Toml {

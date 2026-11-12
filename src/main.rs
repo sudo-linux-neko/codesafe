@@ -1,14 +1,23 @@
-//! Binary entry point for codeguard.
+//! Binary entry point for codesafe.
+//!
+//! Supports human-readable output (default), JSON, and JSONL modes for
+//! agent consumption. Every command emits a structured envelope in JSON
+//! modes: { ok, result, error, meta }.
 
 use clap::Parser;
+use codeguard::config;
+use codeguard::report;
+use codeguard::rule_engine;
+use codeguard::scan;
 use codeguard::{
     Result,
+    aci::{self, Envelope, OutputMode, print_envelope},
     adapters::{LanguageAdapter, cpp::Cpp, python::Python, rust::Rust},
-    cli::{Cli, Command, RuntimeConfig},
-    config, report, rule_engine, scan,
-    types::{FindingStatus, Language, Report, Severity},
+    cli::{Cli, Command, RuntimeConfig, schema_json, skill_document},
+    types::{FindingStatus, Language, Report, Severity, TraceId},
 };
 use rayon::prelude::*;
+use serde::Serialize;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -17,7 +26,7 @@ fn main() -> ExitCode {
     match run(cli) {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("codeguard: {err}");
+            eprintln!("codesafe: {err}");
             ExitCode::from(2)
         }
     }
@@ -26,22 +35,62 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<ExitCode> {
     let config = config::load(&cli.config)?;
     let rt = RuntimeConfig::from_cli(&cli, config)?;
+    let trace_id = aci::make_trace_id("codesafe", None);
+
     match cli.command {
-        Command::Scan { path } => cmd_scan(&path, &rt),
-        Command::Test { path } => cmd_test(&path, &rt),
-        Command::Bench { path } => cmd_bench(&path, &rt),
-        Command::Fix { path } => cmd_fix(&path, &rt),
-        Command::Report { path } => cmd_report(&path, &rt),
-        Command::All { path } => cmd_all(&path, &rt),
-        Command::Init { path } => cmd_init(&path),
+        Command::Scan { path } => cmd_scan(&path, &rt, &trace_id),
+        Command::Test { path } => cmd_test(&path, &rt, &trace_id),
+        Command::Bench { path } => cmd_bench(&path, &rt, &trace_id),
+        Command::Fix { path } => cmd_fix(&path, &rt, &trace_id),
+        Command::Report { path } => cmd_report(&path, &rt, &trace_id),
+        Command::All { path } => cmd_all(&path, &rt, &trace_id),
+        Command::Init { path } => cmd_init(&path, &rt, &trace_id),
+        Command::Schema => cmd_schema(&rt),
+        Command::GenerateSkill { path } => cmd_generate_skill(&path, &rt, &trace_id),
     }
 }
 
-fn adapters_for(path: &std::path::Path) -> Result<codeguard::adapters::AdapterList> {
-    let _scan = scan::scan(path)?;
-    // Instantiate adapters for every language we support; each adapter's detect()
-    // confirms applicability at run time. We keep all adapters so a mixed repo
-    // is handled in parallel.
+/// Emit a success envelope in the requested output mode, returning ExitCode.
+fn emit_ok<T: Serialize>(
+    mode: OutputMode,
+    result: T,
+    command: &str,
+    path: Option<&str>,
+    trace_id: &TraceId,
+) -> ExitCode {
+    let env = Envelope::ok(result, command, path, trace_id);
+    print_envelope(mode, &env);
+    ExitCode::from(0)
+}
+
+/// Emit an error envelope in the requested output mode, returning ExitCode.
+#[allow(clippy::too_many_arguments)]
+fn emit_err(
+    mode: OutputMode,
+    code: &str,
+    category: &str,
+    message: &str,
+    suggestion: Option<&str>,
+    is_retryable: bool,
+    command: &str,
+    path: Option<&str>,
+    trace_id: &TraceId,
+) -> ExitCode {
+    let env: Envelope<()> = Envelope::err(
+        code,
+        category,
+        message,
+        suggestion,
+        is_retryable,
+        command,
+        path,
+        trace_id,
+    );
+    print_envelope(mode, &env);
+    ExitCode::from(1)
+}
+
+fn adapters_for(_path: &std::path::Path) -> Result<codeguard::adapters::AdapterList> {
     Ok(vec![
         Box::new(Python) as Box<dyn LanguageAdapter>,
         Box::new(Rust) as Box<dyn LanguageAdapter>,
@@ -49,26 +98,15 @@ fn adapters_for(path: &std::path::Path) -> Result<codeguard::adapters::AdapterLi
     ])
 }
 
-fn cmd_scan(path: &std::path::Path, _rt: &RuntimeConfig) -> Result<ExitCode> {
-    let result = scan::scan(path)?;
-    println!("{}", scan::render(&result));
-    Ok(ExitCode::from(0))
-}
-
-/// Run build/test/lint/fuzz across applicable adapters and collect tool results,
-/// grouped by language.
 fn run_tools(
     path: &std::path::Path,
     rt: &RuntimeConfig,
 ) -> Result<Vec<(Language, codeguard::adapters::ToolResults)>> {
-    // Work with an absolute path so subprocesses (cargo, cmake, ...) invoked from
-    // this directory never see a doubled/relative path.
     let path = path
         .canonicalize()
         .map_err(|e| codeguard::Error::Config(format!("cannot canonicalize {path:?}: {e}")))?;
     let adapters = adapters_for(&path)?;
 
-    // Run each language's tool suite in parallel — they are independent processes.
     let results: Vec<(Language, codeguard::adapters::ToolResults)> = adapters
         .into_par_iter()
         .filter_map(|adapter| {
@@ -109,7 +147,7 @@ fn worst_severity(results: &[codeguard::types::ToolResult]) -> Option<Severity> 
         let sev = match r.exit_code {
             Some(0) => Severity::Info,
             Some(1) => Severity::Warning,
-            Some(_) if r.exit_code == Some(2) => Severity::Error,
+            Some(2) => Severity::Error,
             Some(_) => Severity::Error,
             None => Severity::Critical,
         };
@@ -149,38 +187,147 @@ fn print_results(results: &[codeguard::types::ToolResult]) {
     }
 }
 
-fn cmd_test(path: &std::path::Path, rt: &RuntimeConfig) -> Result<ExitCode> {
+/// Scan command — detect languages, build systems, tools.
+fn cmd_scan(path: &std::path::Path, rt: &RuntimeConfig, trace_id: &TraceId) -> Result<ExitCode> {
+    let result = scan::scan(path)?;
+    let mode = rt.output_mode;
+
+    #[derive(Serialize)]
+    struct ScanResult {
+        languages: Vec<String>,
+        source_files: usize,
+        build_systems: Vec<String>,
+        config_files: usize,
+        available_tools: Vec<String>,
+        trace_id: String,
+    }
+
+    let scan_result = ScanResult {
+        languages: result.languages.iter().map(|l| l.to_string()).collect(),
+        source_files: result.source_files.len(),
+        build_systems: result.build_systems.iter().map(|b| b.to_string()).collect(),
+        config_files: result.config_files.len(),
+        available_tools: result.tool_results.iter().map(|t| t.tool.clone()).collect(),
+        trace_id: trace_id.clone(),
+    };
+
+    if mode == OutputMode::Human {
+        println!("{}", scan::render(&result));
+    } else {
+        emit_ok(
+            mode,
+            scan_result,
+            "scan",
+            Some(&path.to_string_lossy()),
+            trace_id,
+        );
+    }
+    Ok(ExitCode::from(0))
+}
+
+/// Test command — build, test, lint across all languages.
+fn cmd_test(path: &std::path::Path, rt: &RuntimeConfig, trace_id: &TraceId) -> Result<ExitCode> {
     let results: Vec<codeguard::types::ToolResult> = run_tools(path, rt)?
         .into_iter()
         .flat_map(|(_, r)| r)
         .collect();
-    print_results(&results);
+    let mode = rt.output_mode;
+
+    if mode == OutputMode::Human {
+        print_results(&results);
+    }
+
     let failed = any_failed(&results);
     let worst = worst_severity(&results);
     let gated = worst.is_some_and(|s| rt.fail_on.is_some_and(|f| s >= f));
-    // When --fail-on is set, only fail if the worst severity meets the threshold.
-    // Otherwise, any non-zero exit code is a failure.
     let fail = match rt.fail_on {
         None => failed,
         Some(_) => gated,
     };
+
+    #[derive(Serialize)]
+    struct TestResult {
+        tests_passed: bool,
+        tests_total: u64,
+        tests_failed: u64,
+        tools: Vec<codeguard::types::ToolResult>,
+        worst_severity: Option<String>,
+        fail_on: Option<String>,
+        gated: bool,
+        trace_id: String,
+    }
+
+    let tests_total = results.iter().filter(|r| !r.skipped).count() as u64;
+    let tests_failed = results
+        .iter()
+        .filter(|r| !r.skipped && r.exit_code != Some(0))
+        .count() as u64;
+
+    let test_result = TestResult {
+        tests_passed: !fail,
+        tests_total,
+        tests_failed,
+        tools: results,
+        worst_severity: worst.map(|s| s.to_string()),
+        fail_on: rt.fail_on.map(|s| s.to_string()),
+        gated,
+        trace_id: trace_id.clone(),
+    };
+
+    if mode == OutputMode::Human {
+        if fail {
+            println!("\ncodesafe test: FAIL (fail_on={:?})", rt.fail_on);
+        } else {
+            println!("\ncodesafe test: pass");
+        }
+    } else {
+        emit_ok(
+            mode,
+            test_result,
+            "test",
+            Some(&path.to_string_lossy()),
+            trace_id,
+        );
+    }
+
     if fail {
-        println!("\ncodeguard test: FAIL (fail_on={:?})", rt.fail_on);
         Ok(ExitCode::from(1))
     } else {
-        println!("\ncodeguard test: pass");
         Ok(ExitCode::from(0))
     }
 }
 
-fn cmd_bench(path: &std::path::Path, rt: &RuntimeConfig) -> Result<ExitCode> {
+/// Bench command — run benchmarks, profile, rank hotspots.
+fn cmd_bench(path: &std::path::Path, rt: &RuntimeConfig, trace_id: &TraceId) -> Result<ExitCode> {
     let path = path
         .canonicalize()
         .map_err(|e| codeguard::Error::Config(format!("cannot canonicalize {path:?}: {e}")))?;
     let scan_result = match scan::scan(&path) {
         Ok(s) => s,
         Err(_) => {
-            println!("codeguard bench: {} (no language detected)", path.display());
+            if rt.output_mode == OutputMode::Human {
+                println!("codesafe bench: {} (no language detected)", path.display());
+            } else {
+                #[derive(Serialize)]
+                struct BenchResult {
+                    benchmarks: Vec<codeguard::types::BenchmarkResult>,
+                    hotspots: Vec<codeguard::adapters::Hotspot>,
+                    regressions: u64,
+                    trace_id: String,
+                }
+                emit_ok(
+                    rt.output_mode,
+                    BenchResult {
+                        benchmarks: Vec::new(),
+                        hotspots: Vec::new(),
+                        regressions: 0,
+                        trace_id: trace_id.clone(),
+                    },
+                    "bench",
+                    Some(&path.to_string_lossy()),
+                    trace_id,
+                );
+            }
             return Ok(ExitCode::from(0));
         }
     };
@@ -190,6 +337,8 @@ fn cmd_bench(path: &std::path::Path, rt: &RuntimeConfig) -> Result<ExitCode> {
     let mut regressions = 0u64;
     let mut any_benchmarks = false;
     let mut all_hotspots: Vec<codeguard::adapters::Hotspot> = Vec::new();
+    let mut bench_results: Vec<codeguard::types::BenchmarkResult> = Vec::new();
+
     for adapter in adapters.iter_mut() {
         if !adapter.detect(&path)? {
             continue;
@@ -202,25 +351,22 @@ fn cmd_bench(path: &std::path::Path, rt: &RuntimeConfig) -> Result<ExitCode> {
             dry_run: rt.dry_run,
             force: rt.force,
         };
-        // Repeat the benchmark run and keep the median per benchmark name.
-        let mut series: Vec<(String, String, Vec<f64>)> = Vec::new();
         for _ in 0..rt.bench_runs {
             for b in adapter.bench(ctx)? {
                 if let Some(value) = b.after {
-                    match series.iter_mut().find(|(n, _, _)| n == &b.name) {
-                        Some((_, _, values)) => values.push(value),
-                        None => series.push((b.name.clone(), b.unit.clone(), vec![value])),
+                    match bench_results.iter_mut().find(|n| n.name == b.name) {
+                        Some(existing) => {
+                            existing.after = Some(value);
+                        }
+                        None => bench_results.push(b),
                     }
                 }
             }
         }
-        for (name, unit, mut values) in series {
-            let after = match codeguard::bench::median(&mut values) {
-                Some(v) => v,
-                None => continue,
-            };
+        for b in &bench_results {
+            let after = b.after.unwrap_or(0.0);
             any_benchmarks = true;
-            let before = bench_cache.previous(language, &source_hash, &name);
+            let before = bench_cache.previous(language, &source_hash, &b.name);
             let change_pct = before.map(|base| {
                 if base == 0.0 {
                     0.0
@@ -232,45 +378,64 @@ fn cmd_bench(path: &std::path::Path, rt: &RuntimeConfig) -> Result<ExitCode> {
             if regressed {
                 regressions += 1;
             }
-            let _ = bench_cache.store(language, &source_hash, &name, after);
-            let before_str = before.map_or("n/a".into(), |v| format!("{v:?}"));
-            let change = change_pct.map_or("n/a".into(), |c| format!("{c:+.2}%"));
-            let flag = if regressed { "  REGRESSION" } else { "" };
-            println!(
-                "  bench {}: before={} after={:?} {} change={}{}",
-                name, before_str, after, unit, change, flag
-            );
+            let _ = bench_cache.store(language, &source_hash, &b.name, after);
         }
         for h in adapter.profile(ctx)? {
             all_hotspots.push(h);
         }
     }
+
     all_hotspots.sort_by(|a, b| {
         b.percent_runtime
             .partial_cmp(&a.percent_runtime)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    println!("codeguard bench: {}", path.display());
-    if !any_benchmarks {
-        println!("  benchmarks: none (no benchmark tooling found)");
-    }
-    if regressions > 0 {
-        println!(
-            "  {regressions} regression(s) flagged (threshold {:?}%)",
-            rt.regression_threshold_pct
-        );
-    }
-    if all_hotspots.is_empty() {
-        println!("  hotspots: none (no profiler data available)");
-    } else {
-        println!("  ranked hotspots:");
-        for h in &all_hotspots {
+
+    let mode = rt.output_mode;
+    if mode == OutputMode::Human {
+        println!("codesafe bench: {}", path.display());
+        if !any_benchmarks {
+            println!("  benchmarks: none (no benchmark tooling found)");
+        }
+        if regressions > 0 {
             println!(
-                "    {:5.1}%  {} ({}:{:?})",
-                h.percent_runtime, h.function, h.file, h.line
+                "  {regressions} regression(s) flagged (threshold {:?}%)",
+                rt.regression_threshold_pct
             );
         }
+        if all_hotspots.is_empty() {
+            println!("  hotspots: none (no profiler data available)");
+        } else {
+            println!("  ranked hotspots:");
+            for h in &all_hotspots {
+                println!(
+                    "    {:5.1}%  {} ({}:{:?})",
+                    h.percent_runtime, h.function, h.file, h.line
+                );
+            }
+        }
+    } else {
+        #[derive(Serialize)]
+        struct BenchResult {
+            benchmarks: Vec<codeguard::types::BenchmarkResult>,
+            hotspots: Vec<codeguard::adapters::Hotspot>,
+            regressions: u64,
+            trace_id: String,
+        }
+        emit_ok(
+            mode,
+            BenchResult {
+                benchmarks: bench_results,
+                hotspots: all_hotspots,
+                regressions,
+                trace_id: trace_id.clone(),
+            },
+            "bench",
+            Some(&path.to_string_lossy()),
+            trace_id,
+        );
     }
+
     if regressions > 0 {
         Ok(ExitCode::from(1))
     } else {
@@ -278,48 +443,74 @@ fn cmd_bench(path: &std::path::Path, rt: &RuntimeConfig) -> Result<ExitCode> {
     }
 }
 
-fn cmd_fix(path: &std::path::Path, rt: &RuntimeConfig) -> Result<ExitCode> {
+/// Fix command — apply safe rules with verification loop.
+fn cmd_fix(path: &std::path::Path, rt: &RuntimeConfig, trace_id: &TraceId) -> Result<ExitCode> {
     let path = path
         .canonicalize()
         .map_err(|e| codeguard::Error::Config(format!("cannot canonicalize {path:?}: {e}")))?;
     if codeguard::git::is_git_repo(&path) && !rt.force && codeguard::git::is_dirty(&path)? {
-        return Err(codeguard::Error::Git(
-            "working tree is dirty; commit or stash changes, or use --force".into(),
+        return Ok(emit_err(
+            rt.output_mode,
+            "E001",
+            "git",
+            "working tree is dirty; commit or stash changes, or use --force",
+            Some("commit or stash your changes, then re-run; or pass --force to bypass"),
+            true,
+            "fix",
+            Some(&path.to_string_lossy()),
+            trace_id,
         ));
     }
     let rules_dir = rules_dir_for(&path, rt);
     let engine = rule_engine::RuleEngine::load_from_dir(&rules_dir)?;
     let mut adapters = adapters_for(&path)?;
     let findings = rule_engine::safe_fix_loop(&path, rt, &engine, &mut adapters)?;
-    for f in &findings {
-        println!("[fix] {} [{:?}] {}", f.id, f.status, f.description);
-    }
-    if rt.dry_run {
-        println!("codeguard fix: dry run, no changes applied");
+
+    let mode = rt.output_mode;
+    if mode == OutputMode::Human {
+        for f in &findings {
+            println!("[fix] {} [{:?}] {}", f.id, f.status, f.description);
+        }
+        if rt.dry_run {
+            println!("codesafe fix: dry run, no changes applied");
+        } else {
+            let kept = findings
+                .iter()
+                .filter(|f| f.status == FindingStatus::Fixed)
+                .count();
+            println!("codesafe fix: applied {kept} verified fix(es)");
+        }
     } else {
-        let kept = findings
+        #[derive(Serialize)]
+        struct FixResult {
+            findings: Vec<codeguard::types::Finding>,
+            applied: usize,
+            dry_run: bool,
+            trace_id: String,
+        }
+        let applied = findings
             .iter()
             .filter(|f| f.status == FindingStatus::Fixed)
             .count();
-        println!("codeguard fix: applied {kept} verified fix(es)");
+        emit_ok(
+            mode,
+            FixResult {
+                findings,
+                applied,
+                dry_run: rt.dry_run,
+                trace_id: trace_id.clone(),
+            },
+            "fix",
+            Some(&path.to_string_lossy()),
+            trace_id,
+        );
     }
+
     Ok(ExitCode::from(0))
 }
 
-/// Locate the rules directory: explicit `--config`-adjacent setting, then `<path>/rules`,
-/// then `./rules`.
-fn rules_dir_for(path: &std::path::Path, rt: &RuntimeConfig) -> std::path::PathBuf {
-    if let Some(d) = &rt.rules_dir {
-        return Path::new(d).to_path_buf();
-    }
-    let project_rules = path.join("rules");
-    if project_rules.is_dir() {
-        return project_rules;
-    }
-    Path::new("rules").to_path_buf()
-}
-
-fn cmd_report(path: &std::path::Path, rt: &RuntimeConfig) -> Result<ExitCode> {
+/// Report command — write report.md and report.json.
+fn cmd_report(path: &std::path::Path, rt: &RuntimeConfig, trace_id: &TraceId) -> Result<ExitCode> {
     let _scan = scan::scan(path)?;
     let per_language = run_tools(path, rt)?;
     let mut results: Vec<codeguard::types::ToolResult> = Vec::new();
@@ -349,22 +540,123 @@ fn cmd_report(path: &std::path::Path, rt: &RuntimeConfig) -> Result<ExitCode> {
     report.findings = findings;
     report.ai_tips = ai_tips.clone();
     report.tool_results = results;
+
+    // Parse diagnostics from tool results into structured findings
+    let mut parsed_diagnostics: Vec<codeguard::diagnostics::ParsedDiagnostic> = Vec::new();
+    for r in &report.tool_results {
+        if !r.skipped && r.exit_code != Some(0) {
+            let diag_trace_id = aci::make_trace_id("report", Some(&path.to_string_lossy()));
+            match r.tool.as_str() {
+                "python3" => {
+                    parsed_diagnostics.extend(codeguard::diagnostics::parse_python_compiler(
+                        &r.stderr,
+                        &diag_trace_id,
+                    ));
+                }
+                "ruff" => {
+                    parsed_diagnostics.extend(codeguard::diagnostics::parse_ruff(
+                        &r.stderr,
+                        &diag_trace_id,
+                    ));
+                    parsed_diagnostics.extend(codeguard::diagnostics::parse_ruff(
+                        &r.stdout,
+                        &diag_trace_id,
+                    ));
+                }
+                "pytest" => {
+                    parsed_diagnostics.extend(codeguard::diagnostics::parse_pytest(
+                        &r.stderr,
+                        &diag_trace_id,
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    codeguard::diagnostics::attach_recovery_hints(&mut parsed_diagnostics);
+
+    let mode = rt.output_mode;
     report::write(path, &report)?;
-    println!(
-        "wrote report.md and report.json to {} ({} findings, {} ai tips)",
-        path.display(),
-        report.summary.findings_total,
-        ai_tips.len()
-    );
+
+    if mode == OutputMode::Human {
+        println!(
+            "wrote report.md and report.json to {} ({} findings, {} ai tips)",
+            path.display(),
+            report.summary.findings_total,
+            ai_tips.len()
+        );
+    } else {
+        #[derive(Serialize)]
+        struct ReportResult {
+            path: String,
+            findings_total: usize,
+            ai_tips: usize,
+            tools_found: usize,
+            tools_missing: usize,
+            tests_passed: bool,
+            trace_id: String,
+            parsed_diagnostics_count: usize,
+        }
+        emit_ok(
+            mode,
+            ReportResult {
+                path: path.to_string_lossy().to_string(),
+                findings_total: report.summary.findings_total,
+                ai_tips: ai_tips.len(),
+                tools_found: report.summary.tools_found,
+                tools_missing: report.summary.tools_missing,
+                tests_passed: report.summary.tests_passed,
+                trace_id: trace_id.clone(),
+                parsed_diagnostics_count: parsed_diagnostics.len(),
+            },
+            "report",
+            Some(&path.to_string_lossy()),
+            trace_id,
+        );
+    }
+
     Ok(ExitCode::from(0))
 }
 
-fn cmd_all(path: &std::path::Path, rt: &RuntimeConfig) -> Result<ExitCode> {
-    let _ = cmd_scan(path, rt)?;
-    let test_code = cmd_test(path, rt)?;
-    let _ = cmd_bench(path, rt)?;
-    let fix_code = cmd_fix(path, rt)?;
-    let _ = cmd_report(path, rt)?;
+/// All command — scan → test → bench → fix → report.
+fn cmd_all(path: &std::path::Path, rt: &RuntimeConfig, trace_id: &TraceId) -> Result<ExitCode> {
+    let mode = rt.output_mode;
+    let _ = cmd_scan(path, rt, trace_id)?;
+    let test_code = cmd_test(path, rt, trace_id)?;
+    let _ = cmd_bench(path, rt, trace_id)?;
+    let fix_code = cmd_fix(path, rt, trace_id)?;
+    let _ = cmd_report(path, rt, trace_id)?;
+
+    if mode == OutputMode::Human {
+        if test_code == ExitCode::from(0) && fix_code == ExitCode::from(0) {
+            println!("\ncodesafe all: complete");
+        } else {
+            println!("\ncodesafe all: completed with failures");
+        }
+    } else {
+        #[derive(Serialize)]
+        struct AllResult {
+            scan_passed: bool,
+            test_passed: bool,
+            fix_applied: bool,
+            report_written: bool,
+            trace_id: String,
+        }
+        emit_ok(
+            mode,
+            AllResult {
+                scan_passed: true,
+                test_passed: test_code == ExitCode::from(0),
+                fix_applied: fix_code == ExitCode::from(0),
+                report_written: true,
+                trace_id: trace_id.clone(),
+            },
+            "all",
+            Some(&path.to_string_lossy()),
+            trace_id,
+        );
+    }
+
     if test_code == ExitCode::from(0) && fix_code == ExitCode::from(0) {
         Ok(ExitCode::from(0))
     } else {
@@ -372,13 +664,21 @@ fn cmd_all(path: &std::path::Path, rt: &RuntimeConfig) -> Result<ExitCode> {
     }
 }
 
-/// Initialize a `codeguard.toml` config and `rules/` directory for a project.
-fn cmd_init(path: &std::path::Path) -> Result<ExitCode> {
-    let config_path = path.join("codeguard.toml");
+/// Init command — generate codesafe.toml and rules/.
+fn cmd_init(path: &std::path::Path, rt: &RuntimeConfig, trace_id: &TraceId) -> Result<ExitCode> {
+    let config_path = path.join("codesafe.toml");
     if config_path.exists() {
-        return Err(codeguard::Error::Config(format!(
-            "{config_path:?} already exists; refusing to overwrite"
-        )));
+        return Ok(emit_err(
+            rt.output_mode,
+            "E002",
+            "config",
+            &format!("{config_path:?} already exists; refusing to overwrite"),
+            Some("remove the existing file or choose a different path"),
+            false,
+            "init",
+            Some(&path.to_string_lossy()),
+            trace_id,
+        ));
     }
     std::fs::write(&config_path, config::example())
         .map_err(|e| codeguard::Error::Io(std::io::Error::other(e)))?;
@@ -474,10 +774,90 @@ explanation = "Run cppcheck for static analysis; review findings manually.
     std::fs::write(&cpp_path, cpp_rules)
         .map_err(|e| codeguard::Error::Io(std::io::Error::other(e)))?;
 
-    println!(
-        "Initialized codeguard:\n  config: {}\n  rules:  {}/\n\nEdit codeguard.toml and rules/*.toml to tune behavior.\nRun `codeguard test <path>` to verify.",
-        config_path.display(),
-        rules_dir.display()
-    );
+    let mode = rt.output_mode;
+    if mode == OutputMode::Human {
+        println!(
+            "Initialized codesafe:\n  config: {}\n  rules:  {}/\n\nEdit codesafe.toml and rules/*.toml to tune behavior.\nRun `codesafe test <path>` to verify.",
+            config_path.display(),
+            rules_dir.display()
+        );
+    } else {
+        #[derive(Serialize)]
+        struct InitResult {
+            config_path: String,
+            rules_dir: String,
+            trace_id: String,
+        }
+        emit_ok(
+            mode,
+            InitResult {
+                config_path: config_path.to_string_lossy().to_string(),
+                rules_dir: rules_dir.to_string_lossy().to_string(),
+                trace_id: trace_id.clone(),
+            },
+            "init",
+            Some(&path.to_string_lossy()),
+            trace_id,
+        );
+    }
+
     Ok(ExitCode::from(0))
+}
+
+/// Schema command — emit JSON schema for agent introspection.
+fn cmd_schema(rt: &RuntimeConfig) -> Result<ExitCode> {
+    let schema = schema_json();
+    match rt.output_mode {
+        OutputMode::Human => {
+            println!("{}", serde_json::to_string_pretty(&schema).unwrap());
+            Ok(ExitCode::from(0))
+        }
+        OutputMode::Json | OutputMode::Jsonl => {
+            emit_ok(
+                rt.output_mode,
+                schema,
+                "schema",
+                None,
+                &aci::make_trace_id("schema", None),
+            );
+            Ok(ExitCode::from(0))
+        }
+    }
+}
+
+/// GenerateSkill command — emit an agent skill document for LLM tool-use.
+fn cmd_generate_skill(
+    path: &std::path::Path,
+    rt: &RuntimeConfig,
+    trace_id: &TraceId,
+) -> Result<ExitCode> {
+    let skill = skill_document(&path.to_string_lossy());
+    match rt.output_mode {
+        OutputMode::Human => {
+            println!("{skill}");
+            Ok(ExitCode::from(0))
+        }
+        OutputMode::Json | OutputMode::Jsonl => {
+            emit_ok(
+                rt.output_mode,
+                skill,
+                "generate-skill",
+                Some(&path.to_string_lossy()),
+                trace_id,
+            );
+            Ok(ExitCode::from(0))
+        }
+    }
+}
+
+/// Locate the rules directory.
+fn rules_dir_for(path: &std::path::Path, rt: &RuntimeConfig) -> std::path::PathBuf {
+    if let Some(d) = &rt.rules_dir {
+        return Path::new(d).to_path_buf();
+    }
+    let project_rules = path.join("rules");
+    if project_rules.is_dir() {
+        return project_rules;
+    }
+    Path::new("rules").to_path_buf()
 }
