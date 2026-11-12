@@ -15,10 +15,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact: codeguard-linux-x86_64
             rust: stable
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            artifact: codeguard-linux-aarch64
-            rust: stable
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact: codeguard-macos-x86_64
@@ -91,7 +87,6 @@ jobs:
             | Platform | Asset |
             |----------|-------|
             | Linux x86_64 | `codeguard-linux-x86_64` |
-            | Linux aarch64 (ARM64, Termux) | `codeguard-linux-aarch64` |
             | macOS x86_64 (Intel) | `codeguard-macos-x86_64` |
             | macOS aarch64 (Apple Silicon) | `codeguard-macos-aarch64` |
             | Windows x86_64 | `codeguard-windows-x86_64.exe` |
@@ -108,9 +103,14 @@ jobs:
             Invoke-WebRequest -Uri "https://github.com/sudo-linux-neko/codesafe/releases/download/${{ github.ref_name }}/codeguard-windows-x86_64.exe" -OutFile "$env:USERPROFILE\codeguard.exe"
             ```
 
-            **Termux (Android):**
+            **Termux (Android aarch64):**
+            Build from source (Linux aarch64 binary coming soon):
             ```bash
-            curl -fsSL https://github.com/sudo-linux-neko/codesafe/releases/download/${{ github.ref_name }}/codeguard-linux-aarch64 -o $PREFIX/bin/codeguard && chmod +x $PREFIX/bin/codeguard
+            pkg install rust cargo git
+            export CARGO_TARGET_DIR=$HOME/.cache/codeguard-target
+            git clone https://github.com/sudo-linux-neko/codesafe.git ~/codeguard-src
+            cd ~/codeguard-src && cargo build --release
+            cp target/release/codeguard $PREFIX/bin/codeguard
             ```
           draft: false
           prerelease: false
