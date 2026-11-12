@@ -119,6 +119,29 @@ pub enum Command {
         #[arg(value_name = "PATH", default_value = ".")]
         path: PathBuf,
     },
+    /// Analyze coverage and identify hotspots needing tests.
+    Cover {
+        #[arg(value_name = "PATH", default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value = "5")]
+        min_complexity: u32,
+        #[arg(long, default_value = "50.0")]
+        max_coverage_pct: f64,
+    },
+    /// Generate tests targeting coverage hotspots.
+    GenTest {
+        #[arg(value_name = "PATH", default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value = "10")]
+        max_tests: u32,
+    },
+    /// Run self-healing loop: generate → review → verify → fix.
+    Heal {
+        #[arg(value_name = "PATH", default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value = "5")]
+        max_retries: u32,
+    },
     /// Emit a JSON schema for all commands and flags (agent introspection).
     #[command(hide = true)]
     Schema,
@@ -197,7 +220,10 @@ pub fn schema_json() -> serde_json::Value {
             "spec": { "description": "Write an acceptance criteria spec (test-writing agent only)", "args": { "id": { "type": "string" }, "description": { "type": "string" }, "allowlist": { "type": "array", "items": { "type": "string" } } } },
             "red": { "description": "Write a RED test from a spec (test-writing agent only)", "args": { "spec_id": { "type": "string" }, "test_name": { "type": "string" }, "test_file": { "type": "string" }, "test_source": { "type": "string" } } },
             "verify": { "description": "Run RED-first verification protocol", "args": { "path": { "type": "string", "default": "." } } },
-            "green": { "description": "Run GREEN verification (implementation against RED tests)", "args": { "path": { "type": "string", "default": "." } } }
+            "green": { "description": "Run GREEN verification (implementation against RED tests)", "args": { "path": { "type": "string", "default": "." } } },
+            "cover": { "description": "Analyze coverage and identify hotspots needing tests", "args": { "path": { "type": "string", "default": "." }, "min_complexity": { "type": "integer", "default": 5 }, "max_coverage_pct": { "type": "number", "default": 50.0 } } },
+            "gen-test": { "description": "Generate tests targeting coverage hotspots", "args": { "path": { "type": "string", "default": "." }, "max_tests": { "type": "integer", "default": 10 } } },
+            "heal": { "description": "Run self-healing loop: generate → review → verify → fix", "args": { "path": { "type": "string", "default": "." }, "max_retries": { "type": "integer", "default": 5 } } }
         },
         "output_envelope": {
             "description": "Every json/jsonl response follows this envelope: { ok, result, error, meta }",
@@ -384,6 +410,49 @@ pub fn skill_document(path: &str) -> String {
         "type": "object",
         "properties": {{
           "path": {{ "type": "string", "description": "Repository path (default: .)" }},
+          "output": {{ "type": "string", "enum": ["human", "json", "jsonl"], "description": "Output mode (default: human)" }}
+        }},
+        "required": [],
+        "additionalProperties": false
+      }}
+    }},
+    {{
+      "name": "codesafe cover",
+      "description": "Analyze coverage and identify hotspots needing tests.",
+      "parameters": {{
+        "type": "object",
+        "properties": {{
+          "path": {{ "type": "string", "description": "Repository path (default: .)" }},
+          "min_complexity": {{ "type": "integer", "description": "Minimum cyclomatic complexity (default: 5)" }},
+          "max_coverage_pct": {{ "type": "number", "description": "Max coverage % to be a hotspot (default: 50.0)" }},
+          "output": {{ "type": "string", "enum": ["human", "json", "jsonl"], "description": "Output mode (default: human)" }}
+        }},
+        "required": [],
+        "additionalProperties": false
+      }}
+    }},
+    {{
+      "name": "codesafe gen-test",
+      "description": "Generate tests targeting coverage hotspots.",
+      "parameters": {{
+        "type": "object",
+        "properties": {{
+          "path": {{ "type": "string", "description": "Repository path (default: .)" }},
+          "max_tests": {{ "type": "integer", "description": "Maximum tests to generate (default: 10)" }},
+          "output": {{ "type": "string", "enum": ["human", "json", "jsonl"], "description": "Output mode (default: human)" }}
+        }},
+        "required": [],
+        "additionalProperties": false
+      }}
+    }},
+    {{
+      "name": "codesafe heal",
+      "description": "Run self-healing loop: generate → review → verify → fix.",
+      "parameters": {{
+        "type": "object",
+        "properties": {{
+          "path": {{ "type": "string", "description": "Repository path (default: .)" }},
+          "max_retries": {{ "type": "integer", "description": "Maximum retry attempts per test (default: 5)" }},
           "output": {{ "type": "string", "enum": ["human", "json", "jsonl"], "description": "Output mode (default: human)" }}
         }},
         "required": [],

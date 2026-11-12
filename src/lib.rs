@@ -23,6 +23,7 @@ pub mod profile;
 pub mod report;
 pub mod rule_engine;
 pub mod scan;
+pub mod test_generation;
 pub mod types;
 pub mod verification;
 
